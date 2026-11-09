@@ -1,15 +1,22 @@
+import argparse
 import akshare as ak
 import pandas as pd
 import mplfinance as mpf
 from datetime import datetime, timedelta
 
-# 下载TCL科技近1年日线数据
+# 解析命令行参数：股票代码
+parser = argparse.ArgumentParser(description="绘制A股日K线及MA5/MA20均线图")
+parser.add_argument("code", nargs="?", default="000100", help="股票代码，如 000100")
+args = parser.parse_args()
+code = args.code
+
+# 下载近1年日线数据
 today = datetime.now()
 end_date = today.strftime("%Y%m%d")
 start_date = (today - timedelta(days=360)).strftime("%Y%m%d")
 
 df = ak.stock_zh_a_hist(
-    symbol="000100",
+    symbol=code,
     period="daily",
     start_date=start_date,
     end_date=end_date,
@@ -41,13 +48,20 @@ df = df.dropna()
 style = mpf.make_mpf_style(
     base_mpf_style="yahoo",
     marketcolors=mpf.make_marketcolors(up="r", down="g", inherit=True),
-    rc={"font.family": "SimHei", "axes.unicode_minus": False},
+    rc={
+        "font.family": "Microsoft YaHei",
+        "font.weight": "normal",
+        "axes.titleweight": "normal",
+        "axes.labelweight": "normal",
+        "figure.titleweight": "normal",
+        "axes.unicode_minus": False,
+    },
 )
 
 mpf.plot(
     df,
     type="candle",
-    title="TCL 000100 K线图(MA5+MA20)",
+    title=f"{code} K线图(MA5+MA20)",
     ylabel="价格",
     addplot=[
         mpf.make_addplot(df["MA5"], color="orange", width=1.5, label="MA5"),
@@ -57,5 +71,5 @@ mpf.plot(
     volume=True,
     figratio=(12, 6),
     show_nontrading=False,
-    savefig="output/ma_plot.png",
+    savefig=f"output/ma_plot_{code}.png",
 )
