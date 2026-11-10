@@ -1,4 +1,5 @@
 import argparse
+import os
 import akshare as ak
 import pandas as pd
 import mplfinance as mpf
@@ -43,6 +44,10 @@ df["MA5"] = df["close"].rolling(window=5).mean()
 df["MA20"] = df["close"].rolling(window=20).mean()
 
 df = df.dropna()
+
+# 导出数据到 CSV（含 OHLCV 及 MA5/MA20）
+os.makedirs("output", exist_ok=True)
+df.reset_index()[["date", "close", "MA5", "MA20"]].to_csv(f"output/ma_plot_{code}.csv", index=False, encoding="utf-8-sig")
 
 # 自定义样式：红涨绿跌（A股习惯），并配置中文字体
 style = mpf.make_mpf_style(
