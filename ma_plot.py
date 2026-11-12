@@ -63,6 +63,16 @@ style = mpf.make_mpf_style(
     },
 )
 
+df["signal"] = 0
+df.loc[(df["MA5"] > df["MA20"]) & (df["MA5"].shift(1) <= df["MA20"].shift(1)), "signal"] = 1   # 金叉
+df.loc[(df["MA5"] < df["MA20"]) & (df["MA5"].shift(1) >= df["MA20"].shift(1)), "signal"] = -1  # 死叉
+
+# 打印所有金叉/死叉信号
+signals = df[df["signal"] != 0]
+print(signals[["close", "MA5", "MA20", "signal"]])
+print(f"\n金叉(买入)次数: {(df['signal'] == 1).sum()}")
+print(f"死叉(卖出)次数: {(df['signal'] == -1).sum()}")
+
 mpf.plot(
     df,
     type="candle",
