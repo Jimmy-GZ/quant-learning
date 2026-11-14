@@ -79,33 +79,42 @@ df.loc[(df["MA5"] < df["MA20"]) & (df["MA5"].shift(1) >= df["MA20"].shift(1)), "
 # ========== 回测 ==========
 initial_capital = 100000  # 初始资金 10 万
 commission_rate = 0.00025  # 手续费万 2.5
+slippage_rate = 0.001  # 滑点 0.1%（买卖均按收盘价计）
 
 cash = initial_capital
 shares = 0
 trade_count = 0
 equity_curve = []
+total_commission = 0.0
+total_slippage = 0.0
 
 for date, row in df.iterrows():
     price = row["close"]
     sig = row["signal"]
 
     if sig == 1 and cash > 0:
-        # 金叉：全仓买入（按 100 股取整，扣除手续费）
-        buy_shares = int(cash / (price * (1 + commission_rate)) // 100 * 100)
+        # 金叉：全仓买入（滑点使买价更高，按 100 股取整，扣除手续费和滑点）
+        buy_shares = int(cash / (price * (1 + slippage_rate + commission_rate)) // 100 * 100)
         if buy_shares > 0:
             fee = buy_shares * price * commission_rate
-            cash -= buy_shares * price * (1 + commission_rate)
+            slip = buy_shares * price * slippage_rate
+            cash -= buy_shares * price * (1 + slippage_rate + commission_rate)
             shares = buy_shares
             trade_count += 1
-            print(f"[买入] {date.date()} 价格 {price:.2f} 数量 {buy_shares} 手续费 {fee:.2f}")
+            total_commission += fee
+            total_slippage += slip
+            print(f"[买入] {date.date()} 价格 {price:.2f} 数量 {buy_shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
 
     elif sig == -1 and shares > 0:
-        # 死叉：全仓卖出（扣除手续费）
+        # 死叉：全仓卖出（滑点使卖价更低，扣除手续费和滑点）
         fee = shares * price * commission_rate
-        proceeds = shares * price * (1 - commission_rate)
+        slip = shares * price * slippage_rate
+        proceeds = shares * price * (1 - slippage_rate - commission_rate)
         cash += proceeds
         trade_count += 1
-        print(f"[卖出] {date.date()} 价格 {price:.2f} 数量 {shares} 手续费 {fee:.2f}")
+        total_commission += fee
+        total_slippage += slip
+        print(f"[卖出] {date.date()} 价格 {price:.2f} 数量 {shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
         shares = 0
 
     # 每日账户净值 = 现金 + 持仓市值
@@ -120,11 +129,15 @@ running_max = equity_series.cummax()
 drawdown = (equity_series - running_max) / running_max
 max_drawdown = drawdown.min()
 
-total_return = (final_equity - initial_capital) / initial_capital * 100
+net_profit = final_equity - initial_capital
+total_return = net_profit / initial_capital * 100
 
 print("\n========== 回测结果 ==========")
 print(f"初始资金: {initial_capital:,.2f}")
 print(f"最终净值: {final_equity:,.2f}")
+print(f"净收益: {net_profit:,.2f}")
 print(f"总收益率: {total_return:.2f}%")
 print(f"交易次数: {trade_count}")
+print(f"总手续费: {total_commission:,.2f}")
+print(f"总滑点损耗: {total_slippage:,.2f}")
 print(f"最大回撤: {max_drawdown * 100:.2f}%")
