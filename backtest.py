@@ -33,12 +33,13 @@ def fetch_latest_data(code):
         df = df.rename(
             columns={
                 "日期": "date",
+                "开盘": "open",
                 "收盘": "close",
             }
         )
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").set_index("date")
-        df = df[["close"]]
+        df = df[["open", "close"]]
 
         # 计算 MA5 和 MA20
         df["MA5"] = df["close"].rolling(window=5).mean()
@@ -71,10 +72,19 @@ df = fetch_latest_data(code)
 if df is None:
     df = load_from_csv()
 
-# 计算金叉/死叉信号
+# 执行价优先用 open（T+1 开盘），若数据中没有 open 列则回退到 close
+exec_col = "open" if "open" in df.columns else "close"
+exec_label = "开盘价" if exec_col == "open" else "收盘价"
+if exec_col == "close":
+    print("警告: 数据中无 open 列，执行价回退为当日收盘价")
+
+# 计算金叉/死叉信号（基于 T 日收盘价，T 日收盘后才能确认）
 df["signal"] = 0
 df.loc[(df["MA5"] > df["MA20"]) & (df["MA5"].shift(1) <= df["MA20"].shift(1)), "signal"] = 1   # 金叉
 df.loc[(df["MA5"] < df["MA20"]) & (df["MA5"].shift(1) >= df["MA20"].shift(1)), "signal"] = -1  # 死叉
+
+# 信号在 T 日收盘后生成，T+1 日才能执行，将信号顺延一日避免未来函数
+df["execute_signal"] = df["signal"].shift(1).fillna(0)
 
 # ========== 回测 ==========
 initial_capital = 100000  # 初始资金 10 万
@@ -89,36 +99,37 @@ total_commission = 0.0
 total_slippage = 0.0
 
 for date, row in df.iterrows():
-    price = row["close"]
-    sig = row["signal"]
+    exec_price = row[exec_col]  # 执行价（T+1 开盘）
+    close_price = row["close"]  # 用于每日持仓估值
+    sig = row["execute_signal"]  # 执行的是前一日（T 日）收盘后生成的信号
 
     if sig == 1 and cash > 0:
         # 金叉：全仓买入（滑点使买价更高，按 100 股取整，扣除手续费和滑点）
-        buy_shares = int(cash / (price * (1 + slippage_rate + commission_rate)) // 100 * 100)
+        buy_shares = int(cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
         if buy_shares > 0:
-            fee = buy_shares * price * commission_rate
-            slip = buy_shares * price * slippage_rate
-            cash -= buy_shares * price * (1 + slippage_rate + commission_rate)
+            fee = buy_shares * exec_price * commission_rate
+            slip = buy_shares * exec_price * slippage_rate
+            cash -= buy_shares * exec_price * (1 + slippage_rate + commission_rate)
             shares = buy_shares
             trade_count += 1
             total_commission += fee
             total_slippage += slip
-            print(f"[买入] {date.date()} 价格 {price:.2f} 数量 {buy_shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
+            print(f"[买入] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {buy_shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
 
     elif sig == -1 and shares > 0:
         # 死叉：全仓卖出（滑点使卖价更低，扣除手续费和滑点）
-        fee = shares * price * commission_rate
-        slip = shares * price * slippage_rate
-        proceeds = shares * price * (1 - slippage_rate - commission_rate)
+        fee = shares * exec_price * commission_rate
+        slip = shares * exec_price * slippage_rate
+        proceeds = shares * exec_price * (1 - slippage_rate - commission_rate)
         cash += proceeds
         trade_count += 1
         total_commission += fee
         total_slippage += slip
-        print(f"[卖出] {date.date()} 价格 {price:.2f} 数量 {shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
+        print(f"[卖出] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
         shares = 0
 
-    # 每日账户净值 = 现金 + 持仓市值
-    equity_curve.append(cash + shares * price)
+    # 每日账户净值 = 现金 + 持仓市值（按收盘价估值）
+    equity_curve.append(cash + shares * close_price)
 
 # 回测结束时若仍持仓，按最后收盘价估值
 final_equity = cash + shares * df["close"].iloc[-1]
