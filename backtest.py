@@ -89,44 +89,91 @@ df["execute_signal"] = df["signal"].shift(1).fillna(0)
 # ========== 回测 ==========
 initial_capital = 100000  # 初始资金 10 万
 commission_rate = 0.00025  # 手续费万 2.5
-slippage_rate = 0.001  # 滑点 0.1%（买卖均按收盘价计）
+slippage_rate = 0.001  # 滑点 0.1%
+position_ratio = 0.5  # 每次买入使用 50% 现金
+stop_loss_rate = 0.08  # 止损：买入后亏损 8% 卖出
 
 cash = initial_capital
 shares = 0
+buy_price = 0.0  # 买入成交价（用于止损判断）
+buy_cost = 0.0   # 买入总成本（含滑点手续费，用于盈亏计算）
 trade_count = 0
 equity_curve = []
 total_commission = 0.0
 total_slippage = 0.0
+consecutive_losses = 0
+max_consecutive_losses = 0
+pending_stop_loss = False  # 前一日收盘触发止损，待当日开盘执行
 
 for date, row in df.iterrows():
     exec_price = row[exec_col]  # 执行价（T+1 开盘）
-    close_price = row["close"]  # 用于每日持仓估值
-    sig = row["execute_signal"]  # 执行的是前一日（T 日）收盘后生成的信号
+    close_price = row["close"]  # 用于每日持仓估值和止损判断
+    sig = row["execute_signal"]  # 前一日（T 日）收盘后生成的信号
 
-    if sig == 1 and cash > 0:
-        # 金叉：全仓买入（滑点使买价更高，按 100 股取整，扣除手续费和滑点）
-        buy_shares = int(cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
+    if pending_stop_loss and shares > 0:
+        # 止损卖出（前一日收盘已触发，今日开盘执行）
+        fee = shares * exec_price * commission_rate
+        slip = shares * exec_price * slippage_rate
+        proceeds = shares * exec_price * (1 - slippage_rate - commission_rate)
+        cash += proceeds
+        pnl = proceeds - buy_cost
+        trade_count += 1
+        total_commission += fee
+        total_slippage += slip
+        if pnl < 0:
+            consecutive_losses += 1
+            max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+        else:
+            consecutive_losses = 0
+        print(f"[止损] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f} 手续费 {fee:.2f} 滑点 {slip:.2f}")
+        shares = 0
+        buy_price = 0.0
+        buy_cost = 0.0
+        pending_stop_loss = False
+
+    elif sig == 1 and shares == 0 and cash > 0:
+        # 金叉买入：只用 position_ratio 比例的现金
+        invest_cash = cash * position_ratio
+        buy_shares = int(invest_cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
         if buy_shares > 0:
             fee = buy_shares * exec_price * commission_rate
             slip = buy_shares * exec_price * slippage_rate
-            cash -= buy_shares * exec_price * (1 + slippage_rate + commission_rate)
+            cost = buy_shares * exec_price * (1 + slippage_rate + commission_rate)
+            cash -= cost
             shares = buy_shares
+            buy_price = exec_price
+            buy_cost = cost
             trade_count += 1
             total_commission += fee
             total_slippage += slip
             print(f"[买入] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {buy_shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
 
     elif sig == -1 and shares > 0:
-        # 死叉：全仓卖出（滑点使卖价更低，扣除手续费和滑点）
+        # 死叉卖出
         fee = shares * exec_price * commission_rate
         slip = shares * exec_price * slippage_rate
         proceeds = shares * exec_price * (1 - slippage_rate - commission_rate)
         cash += proceeds
+        pnl = proceeds - buy_cost
         trade_count += 1
         total_commission += fee
         total_slippage += slip
-        print(f"[卖出] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
+        if pnl < 0:
+            consecutive_losses += 1
+            max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+        else:
+            consecutive_losses = 0
+        print(f"[卖出] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f} 手续费 {fee:.2f} 滑点 {slip:.2f}")
         shares = 0
+        buy_price = 0.0
+        buy_cost = 0.0
+
+    # 检查当日收盘是否触发止损（下一交易日开盘执行）
+    if shares > 0:
+        stop_price = buy_price * (1 - stop_loss_rate)
+        pending_stop_loss = close_price <= stop_price
+    else:
+        pending_stop_loss = False
 
     # 每日账户净值 = 现金 + 持仓市值（按收盘价估值）
     equity_curve.append(cash + shares * close_price)
@@ -152,3 +199,4 @@ print(f"交易次数: {trade_count}")
 print(f"总手续费: {total_commission:,.2f}")
 print(f"总滑点损耗: {total_slippage:,.2f}")
 print(f"最大回撤: {max_drawdown * 100:.2f}%")
+print(f"连续亏损次数: {max_consecutive_losses}")
