@@ -109,6 +109,8 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
     shares = 0
     buy_price = 0.0
     buy_cost = 0.0
+    buy_date = None
+    buy_rsi = 0.0
     trade_count = 0
     equity_curve = []
     total_commission = 0.0
@@ -118,6 +120,7 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
     win_count = 0
     sell_count = 0
     pending_stop_loss = False
+    trades = []  # 记录每笔完整交易
 
     for date, row in df.iterrows():
         exec_price = row[exec_col]
@@ -140,11 +143,21 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
             else:
                 consecutive_losses = 0
                 win_count += 1
+            trades.append({
+                "buy_date": buy_date,
+                "buy_price": buy_price,
+                "buy_rsi": buy_rsi,
+                "sell_date": date.date(),
+                "sell_price": exec_price,
+                "sell_reason": "止损",
+                "pnl": pnl,
+            })
             if verbose:
                 print(f"[止损] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f}")
             shares = 0
             buy_price = 0.0
             buy_cost = 0.0
+            buy_date = None
             pending_stop_loss = False
 
         elif sig == 1 and shares == 0 and cash > 0:
@@ -162,6 +175,8 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
                     shares = buy_shares
                     buy_price = exec_price
                     buy_cost = cost
+                    buy_date = date.date()
+                    buy_rsi = row["RSI"]
                     trade_count += 1
                     total_commission += fee
                     total_slippage += slip
@@ -184,11 +199,21 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
             else:
                 consecutive_losses = 0
                 win_count += 1
+            trades.append({
+                "buy_date": buy_date,
+                "buy_price": buy_price,
+                "buy_rsi": buy_rsi,
+                "sell_date": date.date(),
+                "sell_price": exec_price,
+                "sell_reason": "死叉",
+                "pnl": pnl,
+            })
             if verbose:
                 print(f"[卖出] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f}")
             shares = 0
             buy_price = 0.0
             buy_cost = 0.0
+            buy_date = None
 
         # 检查当日收盘是否触发止损
         if shares > 0:
@@ -209,6 +234,17 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
     total_return = net_profit / initial_capital * 100
     win_rate = win_count / sell_count * 100 if sell_count > 0 else 0.0
 
+    # 打印交易明细表
+    rsi_note = f"RSI < {rsi_threshold}" if rsi_threshold is not None else "无 RSI 过滤"
+    print(f"\n--- 交易明细 ({rsi_note}) ---")
+    if trades:
+        print(f"{'买入日期':<12} {'买入价':>8} {'RSI':>6} {'卖出日期':<12} {'卖出价':>8} {'卖出原因':>8} {'盈亏':>10}")
+        print("-" * 70)
+        for t in trades:
+            print(f"{str(t['buy_date']):<12} {t['buy_price']:>8.2f} {t['buy_rsi']:>6.1f} {str(t['sell_date']):<12} {t['sell_price']:>8.2f} {t['sell_reason']:>8} {t['pnl']:>10.2f}")
+    else:
+        print("无交易")
+
     return {
         "final_equity": final_equity,
         "net_profit": net_profit,
@@ -219,6 +255,7 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
         "max_consecutive_losses": max_consecutive_losses,
         "total_commission": total_commission,
         "total_slippage": total_slippage,
+        "trades": trades,
     }
 
 
@@ -234,7 +271,7 @@ for name, threshold in scenarios:
     print(f"\n{'=' * 60}")
     print(f"场景: {name}")
     print(f"{'=' * 60}")
-    r = run_backtest(df, exec_col, exec_label, rsi_threshold=threshold, verbose=True)
+    r = run_backtest(df, exec_col, exec_label, rsi_threshold=threshold, verbose=False)
     r["name"] = name
     results.append(r)
     print(f"\n--- {name} 结果 ---")
