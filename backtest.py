@@ -78,6 +78,16 @@ exec_label = "开盘价" if exec_col == "open" else "收盘价"
 if exec_col == "close":
     print("警告: 数据中无 open 列，执行价回退为当日收盘价")
 
+# 计算 RSI(14)
+delta = df["close"].diff()
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+avg_gain = gain.rolling(window=14).mean()
+avg_loss = loss.rolling(window=14).mean()
+rs = avg_gain / avg_loss
+df["RSI"] = 100 - (100 / (1 + rs))
+df = df.dropna()  # RSI 计算需要 14 日，丢弃前 13 行
+
 # 计算金叉/死叉信号（基于 T 日收盘价，T 日收盘后才能确认）
 df["signal"] = 0
 df.loc[(df["MA5"] > df["MA20"]) & (df["MA5"].shift(1) <= df["MA20"].shift(1)), "signal"] = 1   # 金叉
@@ -86,117 +96,161 @@ df.loc[(df["MA5"] < df["MA20"]) & (df["MA5"].shift(1) >= df["MA20"].shift(1)), "
 # 信号在 T 日收盘后生成，T+1 日才能执行，将信号顺延一日避免未来函数
 df["execute_signal"] = df["signal"].shift(1).fillna(0)
 
-# ========== 回测 ==========
-initial_capital = 100000  # 初始资金 10 万
-commission_rate = 0.00025  # 手续费万 2.5
-slippage_rate = 0.001  # 滑点 0.1%
-position_ratio = 0.5  # 每次买入使用 50% 现金
-stop_loss_rate = 0.08  # 止损：买入后亏损 8% 卖出
 
-cash = initial_capital
-shares = 0
-buy_price = 0.0  # 买入成交价（用于止损判断）
-buy_cost = 0.0   # 买入总成本（含滑点手续费，用于盈亏计算）
-trade_count = 0
-equity_curve = []
-total_commission = 0.0
-total_slippage = 0.0
-consecutive_losses = 0
-max_consecutive_losses = 0
-pending_stop_loss = False  # 前一日收盘触发止损，待当日开盘执行
+def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
+    """运行单组回测，rsi_threshold 为 None 表示不启用 RSI 过滤"""
+    initial_capital = 100000
+    commission_rate = 0.00025
+    slippage_rate = 0.001
+    position_ratio = 0.5
+    stop_loss_rate = 0.08
 
-for date, row in df.iterrows():
-    exec_price = row[exec_col]  # 执行价（T+1 开盘）
-    close_price = row["close"]  # 用于每日持仓估值和止损判断
-    sig = row["execute_signal"]  # 前一日（T 日）收盘后生成的信号
+    cash = initial_capital
+    shares = 0
+    buy_price = 0.0
+    buy_cost = 0.0
+    trade_count = 0
+    equity_curve = []
+    total_commission = 0.0
+    total_slippage = 0.0
+    consecutive_losses = 0
+    max_consecutive_losses = 0
+    win_count = 0
+    sell_count = 0
+    pending_stop_loss = False
 
-    if pending_stop_loss and shares > 0:
-        # 止损卖出（前一日收盘已触发，今日开盘执行）
-        fee = shares * exec_price * commission_rate
-        slip = shares * exec_price * slippage_rate
-        proceeds = shares * exec_price * (1 - slippage_rate - commission_rate)
-        cash += proceeds
-        pnl = proceeds - buy_cost
-        trade_count += 1
-        total_commission += fee
-        total_slippage += slip
-        if pnl < 0:
-            consecutive_losses += 1
-            max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
-        else:
-            consecutive_losses = 0
-        print(f"[止损] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f} 手续费 {fee:.2f} 滑点 {slip:.2f}")
-        shares = 0
-        buy_price = 0.0
-        buy_cost = 0.0
-        pending_stop_loss = False
+    for date, row in df.iterrows():
+        exec_price = row[exec_col]
+        close_price = row["close"]
+        sig = row["execute_signal"]
 
-    elif sig == 1 and shares == 0 and cash > 0:
-        # 金叉买入：只用 position_ratio 比例的现金
-        invest_cash = cash * position_ratio
-        buy_shares = int(invest_cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
-        if buy_shares > 0:
-            fee = buy_shares * exec_price * commission_rate
-            slip = buy_shares * exec_price * slippage_rate
-            cost = buy_shares * exec_price * (1 + slippage_rate + commission_rate)
-            cash -= cost
-            shares = buy_shares
-            buy_price = exec_price
-            buy_cost = cost
+        if pending_stop_loss and shares > 0:
+            fee = shares * exec_price * commission_rate
+            slip = shares * exec_price * slippage_rate
+            proceeds = shares * exec_price * (1 - slippage_rate - commission_rate)
+            cash += proceeds
+            pnl = proceeds - buy_cost
             trade_count += 1
+            sell_count += 1
             total_commission += fee
             total_slippage += slip
-            print(f"[买入] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {buy_shares} 手续费 {fee:.2f} 滑点 {slip:.2f}")
+            if pnl < 0:
+                consecutive_losses += 1
+                max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+            else:
+                consecutive_losses = 0
+                win_count += 1
+            if verbose:
+                print(f"[止损] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f}")
+            shares = 0
+            buy_price = 0.0
+            buy_cost = 0.0
+            pending_stop_loss = False
 
-    elif sig == -1 and shares > 0:
-        # 死叉卖出
-        fee = shares * exec_price * commission_rate
-        slip = shares * exec_price * slippage_rate
-        proceeds = shares * exec_price * (1 - slippage_rate - commission_rate)
-        cash += proceeds
-        pnl = proceeds - buy_cost
-        trade_count += 1
-        total_commission += fee
-        total_slippage += slip
-        if pnl < 0:
-            consecutive_losses += 1
-            max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+        elif sig == 1 and shares == 0 and cash > 0:
+            # 金叉买入：若启用 RSI 过滤，要求 RSI < 阈值
+            if rsi_threshold is not None and row["RSI"] >= rsi_threshold:
+                pass  # RSI 不满足，跳过买入
+            else:
+                invest_cash = cash * position_ratio
+                buy_shares = int(invest_cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
+                if buy_shares > 0:
+                    fee = buy_shares * exec_price * commission_rate
+                    slip = buy_shares * exec_price * slippage_rate
+                    cost = buy_shares * exec_price * (1 + slippage_rate + commission_rate)
+                    cash -= cost
+                    shares = buy_shares
+                    buy_price = exec_price
+                    buy_cost = cost
+                    trade_count += 1
+                    total_commission += fee
+                    total_slippage += slip
+                    if verbose:
+                        print(f"[买入] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {buy_shares} RSI {row['RSI']:.1f}")
+
+        elif sig == -1 and shares > 0:
+            fee = shares * exec_price * commission_rate
+            slip = shares * exec_price * slippage_rate
+            proceeds = shares * exec_price * (1 - slippage_rate - commission_rate)
+            cash += proceeds
+            pnl = proceeds - buy_cost
+            trade_count += 1
+            sell_count += 1
+            total_commission += fee
+            total_slippage += slip
+            if pnl < 0:
+                consecutive_losses += 1
+                max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+            else:
+                consecutive_losses = 0
+                win_count += 1
+            if verbose:
+                print(f"[卖出] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f}")
+            shares = 0
+            buy_price = 0.0
+            buy_cost = 0.0
+
+        # 检查当日收盘是否触发止损
+        if shares > 0:
+            stop_price = buy_price * (1 - stop_loss_rate)
+            pending_stop_loss = close_price <= stop_price
         else:
-            consecutive_losses = 0
-        print(f"[卖出] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {shares} 盈亏 {pnl:.2f} 手续费 {fee:.2f} 滑点 {slip:.2f}")
-        shares = 0
-        buy_price = 0.0
-        buy_cost = 0.0
+            pending_stop_loss = False
 
-    # 检查当日收盘是否触发止损（下一交易日开盘执行）
-    if shares > 0:
-        stop_price = buy_price * (1 - stop_loss_rate)
-        pending_stop_loss = close_price <= stop_price
-    else:
-        pending_stop_loss = False
+        equity_curve.append(cash + shares * close_price)
 
-    # 每日账户净值 = 现金 + 持仓市值（按收盘价估值）
-    equity_curve.append(cash + shares * close_price)
+    final_equity = cash + shares * df["close"].iloc[-1]
+    equity_series = pd.Series(equity_curve, index=df.index)
+    running_max = equity_series.cummax()
+    drawdown = (equity_series - running_max) / running_max
+    max_drawdown = drawdown.min()
 
-# 回测结束时若仍持仓，按最后收盘价估值
-final_equity = cash + shares * df["close"].iloc[-1]
+    net_profit = final_equity - initial_capital
+    total_return = net_profit / initial_capital * 100
+    win_rate = win_count / sell_count * 100 if sell_count > 0 else 0.0
 
-# 计算最大回撤
-equity_series = pd.Series(equity_curve, index=df.index)
-running_max = equity_series.cummax()
-drawdown = (equity_series - running_max) / running_max
-max_drawdown = drawdown.min()
+    return {
+        "final_equity": final_equity,
+        "net_profit": net_profit,
+        "total_return": total_return,
+        "trade_count": trade_count,
+        "win_rate": win_rate,
+        "max_drawdown": max_drawdown * 100,
+        "max_consecutive_losses": max_consecutive_losses,
+        "total_commission": total_commission,
+        "total_slippage": total_slippage,
+    }
 
-net_profit = final_equity - initial_capital
-total_return = net_profit / initial_capital * 100
 
-print("\n========== 回测结果 ==========")
-print(f"初始资金: {initial_capital:,.2f}")
-print(f"最终净值: {final_equity:,.2f}")
-print(f"净收益: {net_profit:,.2f}")
-print(f"总收益率: {total_return:.2f}%")
-print(f"交易次数: {trade_count}")
-print(f"总手续费: {total_commission:,.2f}")
-print(f"总滑点损耗: {total_slippage:,.2f}")
-print(f"最大回撤: {max_drawdown * 100:.2f}%")
-print(f"连续亏损次数: {max_consecutive_losses}")
+# ========== 运行三组对比 ==========
+scenarios = [
+    ("无 RSI 过滤", None),
+    ("RSI < 50", 50),
+    ("RSI < 45", 45),
+]
+
+results = []
+for name, threshold in scenarios:
+    print(f"\n{'=' * 60}")
+    print(f"场景: {name}")
+    print(f"{'=' * 60}")
+    r = run_backtest(df, exec_col, exec_label, rsi_threshold=threshold, verbose=True)
+    r["name"] = name
+    results.append(r)
+    print(f"\n--- {name} 结果 ---")
+    print(f"最终净值: {r['final_equity']:,.2f}")
+    print(f"净收益: {r['net_profit']:,.2f}")
+    print(f"总收益率: {r['total_return']:.2f}%")
+    print(f"交易次数: {r['trade_count']}")
+    print(f"胜率: {r['win_rate']:.1f}%")
+    print(f"最大回撤: {r['max_drawdown']:.2f}%")
+    print(f"连续亏损次数: {r['max_consecutive_losses']}")
+
+# ========== 对比汇总表 ==========
+print(f"\n{'=' * 70}")
+print("过滤前后对比")
+print(f"{'=' * 70}")
+print(f"{'场景':<14} {'交易次数':>8} {'胜率':>8} {'最大回撤':>10} {'总收益率':>10} {'最终净值':>12}")
+print("-" * 70)
+for r in results:
+    print(f"{r['name']:<14} {r['trade_count']:>8} {r['win_rate']:>7.1f}% {r['max_drawdown']:>9.2f}% {r['total_return']:>9.2f}% {r['final_equity']:>12,.2f}")
