@@ -79,6 +79,13 @@ df = fetch_latest_data(code)
 if df is None:
     df = load_from_csv()
 
+# 计算标的 20 日年化波动率：基于收盘价日收益率的 20 日滚动标准差，年化（×√252），取全期均值
+# 该指标是标的本身的属性，与策略/RSI 过滤无关，三组场景共用同一个值
+close_returns = df["close"].pct_change()
+volatility_20d = close_returns.rolling(window=20).std() * (252 ** 0.5)
+volatility_20d = volatility_20d.mean() * 100  # 转为百分比
+print(f"标的 20 日年化波动率: {volatility_20d:.2f}%")
+
 # 执行价优先用 open（T+1 开盘），若数据中没有 open 列则回退到 close
 exec_col = "open" if "open" in df.columns else "close"
 exec_label = "开盘价" if exec_col == "open" else "收盘价"

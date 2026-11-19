@@ -5,7 +5,7 @@ A股双均线（MA5/MA20）金叉死叉策略的可视化与回测脚本。
 ## 依赖
 
 ```
-pip install akshare pandas mplfinance matplotlib
+pip install akshare tushare pandas mplfinance matplotlib
 ```
 
 ## 文件说明
@@ -13,7 +13,9 @@ pip install akshare pandas mplfinance matplotlib
 | 文件 | 功能 |
 |------|------|
 | `ma_plot.py` | 下载个股日线数据，绘制 K 线图 + MA5/MA20 均线 + 成交量，并标记金叉/死叉信号 |
-| `backtest.py` | MA5/MA20 金叉死叉策略回测（含手续费、滑点、半仓、8% 止损、RSI 过滤），对比无过滤/RSI<50/RSI<45，输出每笔交易明细及交易次数、胜率、最大回撤 |
+| `backtest.py` | MA5/MA20 金叉死叉策略回测（含手续费、滑点、半仓、8% 止损、RSI 过滤），对比无过滤/RSI<50/RSI<45，输出每笔交易明细及交易次数、胜率、最大回撤、20 日年化波动率 |
+| `ma_plot_tushare.py` | 同 `ma_plot.py`，但使用 Tushare 作为数据源 |
+| `backtest_tushare.py` | 同 `backtest.py`，但使用 Tushare 作为数据源 |
 
 ## ma_plot.py — K 线图绘制
 
@@ -59,9 +61,11 @@ python backtest.py [股票代码]
 
 ### 输出
 
+- 数据加载后打印一次 **标的 20 日年化波动率**（基于收盘价，与策略/过滤无关，三组场景共用）
 - 同时运行三组场景：无 RSI 过滤、RSI < 50、RSI < 45
 - 每个场景打印交易明细表：买入日期、买入价、买入时 RSI、卖出日期、卖出价、卖出原因（死叉/止损）、盈亏
 - 对比汇总表：交易次数、胜率、最大回撤、总收益率、最终净值
+- 20 日年化波动率：标的收盘价日收益率的 20 日滚动标准差，年化（×√252），取整个回测期间的均值
 
 ## 输出目录
 
