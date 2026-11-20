@@ -12,6 +12,10 @@ code = args.code
 
 CSV_PATH = f"output/ma_plot_{code}.csv"
 
+# 量能共振参数：均量周期、放量倍数（金叉当日成交量 > VOL_MA_PERIOD 日均量 * VOL_RATIO 才买入）
+VOL_MA_PERIOD = 20
+VOL_RATIO = 1.5
+
 
 def fetch_latest_data(code):
     """通过 akshare 获取最新日线数据，失败则返回 None"""
@@ -35,11 +39,12 @@ def fetch_latest_data(code):
                 "日期": "date",
                 "开盘": "open",
                 "收盘": "close",
+                "成交量": "volume",
             }
         )
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").set_index("date")
-        df = df[["open", "close"]]
+        df = df[["open", "close", "volume"]]
 
         # 计算 MA5 和 MA20
         df["MA5"] = df["close"].rolling(window=5).mean()
@@ -72,6 +77,15 @@ df = fetch_latest_data(code)
 if df is None:
     df = load_from_csv()
 
+# 量能共振需要 volume 列；若本地旧 CSV 缺少该列，尝试重新拉取一次
+if "volume" not in df.columns:
+    print("本地数据缺少 volume 列，尝试重新获取最新数据...")
+    fresh = fetch_latest_data(code)
+    if fresh is not None and "volume" in fresh.columns:
+        df = fresh
+    else:
+        print("警告: 仍未获取到 volume 列，量能共振过滤将无法生效")
+
 # 计算标的 20 日年化波动率：基于收盘价日收益率的 20 日滚动标准差，年化（×√252），取全期均值
 # 该指标是标的本身的属性，与策略/RSI 过滤无关，三组场景共用同一个值
 close_returns = df["close"].pct_change()
@@ -103,9 +117,26 @@ df.loc[(df["MA5"] < df["MA20"]) & (df["MA5"].shift(1) >= df["MA20"].shift(1)), "
 # 信号在 T 日收盘后生成，T+1 日才能执行，将信号顺延一日避免未来函数
 df["execute_signal"] = df["signal"].shift(1).fillna(0)
 
+# 计算量能共振：T 日成交量 > VOL_MA_PERIOD 日均量 * VOL_RATIO（T 日收盘后已知）
+# 与 execute_signal 同样顺延一日，T+1 执行买入时取 T 日的量能确认
+has_volume = "volume" in df.columns
+if has_volume:
+    df["VOL_MA20"] = df["volume"].rolling(window=VOL_MA_PERIOD).mean()
+    df["vol_ratio"] = df["volume"] / df["VOL_MA20"]
+    df["vol_confirm"] = df["volume"] > df["VOL_MA20"] * VOL_RATIO
+    df["vol_confirm_lag"] = df["vol_confirm"].shift(1) == True
+    df["vol_ratio_lag"] = df["vol_ratio"].shift(1)
+    df = df.dropna(subset=["VOL_MA20"])  # 丢弃均量计算不足的行
+else:
+    df["vol_confirm_lag"] = False
+    df["vol_ratio_lag"] = float("nan")
 
-def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
-    """运行单组回测，rsi_threshold 为 None 表示不启用 RSI 过滤"""
+
+def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False, verbose=False):
+    """运行单组回测
+    rsi_threshold 为 None 表示不启用 RSI 过滤
+    vol_filter 为 True 表示启用成交量共振过滤（金叉当日量 > 20日均量*1.5 才买入）
+    """
     initial_capital = 100000
     commission_rate = 0.00025
     slippage_rate = 0.001
@@ -118,6 +149,7 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
     buy_cost = 0.0
     buy_date = None
     buy_rsi = 0.0
+    buy_vol_ratio = 0.0
     trade_count = 0
     equity_curve = []
     total_commission = 0.0
@@ -154,6 +186,7 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
                 "buy_date": buy_date,
                 "buy_price": buy_price,
                 "buy_rsi": buy_rsi,
+                "buy_vol_ratio": buy_vol_ratio,
                 "sell_date": date.date(),
                 "sell_price": exec_price,
                 "sell_reason": "止损",
@@ -165,13 +198,14 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
             buy_price = 0.0
             buy_cost = 0.0
             buy_date = None
+            buy_vol_ratio = 0.0
             pending_stop_loss = False
 
         elif sig == 1 and shares == 0 and cash > 0:
-            # 金叉买入：若启用 RSI 过滤，要求 RSI < 阈值
-            if rsi_threshold is not None and row["RSI"] >= rsi_threshold:
-                pass  # RSI 不满足，跳过买入
-            else:
+            # 金叉买入过滤：RSI 不满足 或 量能不共振 则跳过
+            rsi_ok = rsi_threshold is None or row["RSI"] < rsi_threshold
+            vol_ok = (not vol_filter) or bool(row["vol_confirm_lag"])
+            if rsi_ok and vol_ok:
                 invest_cash = cash * position_ratio
                 buy_shares = int(invest_cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
                 if buy_shares > 0:
@@ -184,11 +218,12 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
                     buy_cost = cost
                     buy_date = date.date()
                     buy_rsi = row["RSI"]
+                    buy_vol_ratio = row["vol_ratio_lag"]
                     trade_count += 1
                     total_commission += fee
                     total_slippage += slip
                     if verbose:
-                        print(f"[买入] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {buy_shares} RSI {row['RSI']:.1f}")
+                        print(f"[买入] 执行日 {date.date()} {exec_label} {exec_price:.2f} 数量 {buy_shares} RSI {row['RSI']:.1f} 量比 {row['vol_ratio_lag']:.2f}")
 
         elif sig == -1 and shares > 0:
             fee = shares * exec_price * commission_rate
@@ -210,6 +245,7 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
                 "buy_date": buy_date,
                 "buy_price": buy_price,
                 "buy_rsi": buy_rsi,
+                "buy_vol_ratio": buy_vol_ratio,
                 "sell_date": date.date(),
                 "sell_price": exec_price,
                 "sell_reason": "死叉",
@@ -221,6 +257,7 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
             buy_price = 0.0
             buy_cost = 0.0
             buy_date = None
+            buy_vol_ratio = 0.0
 
         # 检查当日收盘是否触发止损
         if shares > 0:
@@ -242,13 +279,18 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
     win_rate = win_count / sell_count * 100 if sell_count > 0 else 0.0
 
     # 打印交易明细表
-    rsi_note = f"RSI < {rsi_threshold}" if rsi_threshold is not None else "无 RSI 过滤"
-    print(f"\n--- 交易明细 ({rsi_note}) ---")
+    notes = []
+    notes.append(f"RSI < {rsi_threshold}" if rsi_threshold is not None else "无 RSI 过滤")
+    if vol_filter:
+        notes.append(f"量能共振(量>{VOL_MA_PERIOD}日均量*{VOL_RATIO})")
+    print(f"\n--- 交易明细 ({', '.join(notes)}) ---")
     if trades:
-        print(f"{'买入日期':<12} {'买入价':>8} {'RSI':>6} {'卖出日期':<12} {'卖出价':>8} {'卖出原因':>8} {'盈亏':>10}")
-        print("-" * 70)
+        print(f"{'买入日期':<12} {'买入价':>8} {'RSI':>6} {'量比':>6} {'卖出日期':<12} {'卖出价':>8} {'卖出原因':>8} {'盈亏':>10}")
+        print("-" * 78)
         for t in trades:
-            print(f"{str(t['buy_date']):<12} {t['buy_price']:>8.2f} {t['buy_rsi']:>6.1f} {str(t['sell_date']):<12} {t['sell_price']:>8.2f} {t['sell_reason']:>8} {t['pnl']:>10.2f}")
+            vr = t['buy_vol_ratio']
+            vr_str = f"{vr:.2f}" if pd.notna(vr) else "-"
+            print(f"{str(t['buy_date']):<12} {t['buy_price']:>8.2f} {t['buy_rsi']:>6.1f} {vr_str:>6} {str(t['sell_date']):<12} {t['sell_price']:>8.2f} {t['sell_reason']:>8} {t['pnl']:>10.2f}")
     else:
         print("无交易")
 
@@ -266,19 +308,25 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, verbose=False):
     }
 
 
-# ========== 运行三组对比 ==========
+# ========== 运行多组对比 ==========
+# 每组场景指定是否启用 RSI 过滤(rsi_threshold)与是否启用成交量共振(vol_filter)
 scenarios = [
-    ("无 RSI 过滤", None),
-    ("RSI < 50", 50),
-    ("RSI < 45", 45),
+    {"name": "无过滤",       "rsi_threshold": None, "vol_filter": False},
+    {"name": "量能共振",     "rsi_threshold": None, "vol_filter": True},
+    {"name": "RSI < 50",     "rsi_threshold": 50,   "vol_filter": False},
+    {"name": "RSI < 45",     "rsi_threshold": 45,   "vol_filter": False},
 ]
 
 results = []
-for name, threshold in scenarios:
+for sc in scenarios:
+    name = sc["name"]
     print(f"\n{'=' * 60}")
     print(f"场景: {name}")
     print(f"{'=' * 60}")
-    r = run_backtest(df, exec_col, exec_label, rsi_threshold=threshold, verbose=False)
+    r = run_backtest(df, exec_col, exec_label,
+                     rsi_threshold=sc["rsi_threshold"],
+                     vol_filter=sc["vol_filter"],
+                     verbose=False)
     r["name"] = name
     results.append(r)
     print(f"\n--- {name} 结果 ---")
