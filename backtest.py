@@ -24,7 +24,7 @@ def fetch_latest_data(code):
 
         today = datetime.now()
         end_date = today.strftime("%Y%m%d")
-        start_date = (today - timedelta(days=360)).strftime("%Y%m%d")
+        start_date = (today - timedelta(days=365 * 3)).strftime("%Y%m%d")
 
         df = ak.stock_zh_a_hist(
             symbol=code,
