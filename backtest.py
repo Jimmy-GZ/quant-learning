@@ -132,9 +132,8 @@ else:
     df["vol_ratio_lag"] = float("nan")
 
 
-def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False, verbose=False):
+def run_backtest(df, exec_col, exec_label, vol_filter=False, verbose=False):
     """运行单组回测
-    rsi_threshold 为 None 表示不启用 RSI 过滤
     vol_filter 为 True 表示启用成交量共振过滤（金叉当日量 > 20日均量*1.5 才买入）
     """
     initial_capital = 100000
@@ -202,10 +201,9 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False,
             pending_stop_loss = False
 
         elif sig == 1 and shares == 0 and cash > 0:
-            # 金叉买入过滤：RSI 不满足 或 量能不共振 则跳过
-            rsi_ok = rsi_threshold is None or row["RSI"] < rsi_threshold
+            # 金叉买入：量能不共振则跳过（仅量能共振场景启用）
             vol_ok = (not vol_filter) or bool(row["vol_confirm_lag"])
-            if rsi_ok and vol_ok:
+            if vol_ok:
                 invest_cash = cash * position_ratio
                 buy_shares = int(invest_cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
                 if buy_shares > 0:
@@ -280,10 +278,10 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False,
 
     # 打印交易明细表
     notes = []
-    notes.append(f"RSI < {rsi_threshold}" if rsi_threshold is not None else "无 RSI 过滤")
     if vol_filter:
         notes.append(f"量能共振(量>{VOL_MA_PERIOD}日均量*{VOL_RATIO})")
-    print(f"\n--- 交易明细 ({', '.join(notes)}) ---")
+    label = "、".join(notes) if notes else "无过滤"
+    print(f"\n--- 交易明细 ({label}) ---")
     if trades:
         print(f"{'买入日期':<12} {'买入价':>8} {'RSI':>6} {'量比':>6} {'卖出日期':<12} {'卖出价':>8} {'卖出原因':>8} {'盈亏':>10}")
         print("-" * 78)
@@ -309,12 +307,10 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False,
 
 
 # ========== 运行多组对比 ==========
-# 每组场景指定是否启用 RSI 过滤(rsi_threshold)与是否启用成交量共振(vol_filter)
+# 每组场景指定是否启用成交量共振过滤(vol_filter)
 scenarios = [
-    {"name": "无过滤",       "rsi_threshold": None, "vol_filter": False},
-    {"name": "量能共振",     "rsi_threshold": None, "vol_filter": True},
-    {"name": "RSI < 50",     "rsi_threshold": 50,   "vol_filter": False},
-    {"name": "RSI < 45",     "rsi_threshold": 45,   "vol_filter": False},
+    {"name": "无过滤",   "vol_filter": False},
+    {"name": "量能共振", "vol_filter": True},
 ]
 
 results = []
@@ -324,7 +320,6 @@ for sc in scenarios:
     print(f"场景: {name}")
     print(f"{'=' * 60}")
     r = run_backtest(df, exec_col, exec_label,
-                     rsi_threshold=sc["rsi_threshold"],
                      vol_filter=sc["vol_filter"],
                      verbose=False)
     r["name"] = name

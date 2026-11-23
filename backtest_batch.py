@@ -71,7 +71,6 @@ def run_one_stock(code):
     for sc in SCENARIOS:
         r = run_backtest(
             df, exec_col, exec_label,
-            rsi_threshold=sc["rsi_threshold"],
             vol_filter=sc["vol_filter"],
             verbose=False, silent=True,
         )

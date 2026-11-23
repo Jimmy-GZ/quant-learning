@@ -36,12 +36,12 @@ def code_to_ts_code(code):
         return f"{code}.BJ"
 
 
-def fetch_latest_data(code):
-    """通过 Tushare 获取最新日线数据，失败则返回 None"""
+def fetch_latest_data(code, years=3):
+    """通过 Tushare 获取最新日线数据，失败则返回 None；years 控制拉取年数（用于更长预热期）"""
     try:
         today = datetime.now()
         end_date = today.strftime("%Y%m%d")
-        start_date = (today - timedelta(days=365 * 3)).strftime("%Y%m%d")
+        start_date = (today - timedelta(days=365 * years)).strftime("%Y%m%d")
 
         df = ts.pro_bar(
             ts_code=code_to_ts_code(code),
@@ -120,9 +120,8 @@ def prepare_df(df):
     return df
 
 
-def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False, verbose=False, silent=False):
+def run_backtest(df, exec_col, exec_label, vol_filter=False, verbose=False, silent=False):
     """运行单组回测
-    rsi_threshold 为 None 表示不启用 RSI 过滤
     vol_filter 为 True 表示启用成交量共振过滤（金叉当日量 > VOL_MA_PERIOD 日均量 * VOL_RATIO 才买入）
     silent 为 True 时不打印交易明细表（供批量回测调用）
     """
@@ -191,10 +190,9 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False,
             pending_stop_loss = False
 
         elif sig == 1 and shares == 0 and cash > 0:
-            # 金叉买入过滤：RSI 不满足 或 量能不共振 则跳过
-            rsi_ok = rsi_threshold is None or row["RSI"] < rsi_threshold
+            # 金叉买入：量能不共振则跳过（仅量能共振场景启用）
             vol_ok = (not vol_filter) or bool(row["vol_confirm_lag"])
-            if rsi_ok and vol_ok:
+            if vol_ok:
                 invest_cash = cash * position_ratio
                 buy_shares = int(invest_cash / (exec_price * (1 + slippage_rate + commission_rate)) // 100 * 100)
                 if buy_shares > 0:
@@ -270,10 +268,10 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False,
     # 打印交易明细表（批量回测时 silent 跳过）
     if not silent:
         notes = []
-        notes.append(f"RSI < {rsi_threshold}" if rsi_threshold is not None else "无 RSI 过滤")
         if vol_filter:
             notes.append(f"量能共振(量>{VOL_MA_PERIOD}日均量*{VOL_RATIO})")
-        print(f"\n--- 交易明细 ({', '.join(notes)}) ---")
+        label = "、".join(notes) if notes else "无过滤"
+        print(f"\n--- 交易明细 ({label}) ---")
         if trades:
             print(f"{'买入日期':<12} {'买入价':>8} {'RSI':>6} {'量比':>6} {'卖出日期':<12} {'卖出价':>8} {'卖出原因':>8} {'盈亏':>10}")
             print("-" * 78)
@@ -298,12 +296,10 @@ def run_backtest(df, exec_col, exec_label, rsi_threshold=None, vol_filter=False,
     }
 
 
-# 对比场景：每组指定是否启用 RSI 过滤(rsi_threshold)与是否启用成交量共振(vol_filter)
+# 对比场景：每组指定是否启用成交量共振过滤(vol_filter)
 SCENARIOS = [
-    {"name": "无过滤",       "rsi_threshold": None, "vol_filter": False},
-    {"name": "量能共振",     "rsi_threshold": None, "vol_filter": True},
-    {"name": "RSI < 50",     "rsi_threshold": 50,   "vol_filter": False},
-    {"name": "RSI < 45",     "rsi_threshold": 45,   "vol_filter": False},
+    {"name": "无过滤",   "vol_filter": False},
+    {"name": "量能共振", "vol_filter": True},
 ]
 
 
@@ -312,7 +308,6 @@ def run_scenarios(df, exec_col, exec_label, verbose=False):
     results = []
     for sc in SCENARIOS:
         r = run_backtest(df, exec_col, exec_label,
-                         rsi_threshold=sc["rsi_threshold"],
                          vol_filter=sc["vol_filter"],
                          verbose=verbose)
         r["name"] = sc["name"]
